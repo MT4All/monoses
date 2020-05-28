@@ -15,6 +15,7 @@
 
 import argparse
 import glob
+import gzip
 import os
 import shutil
 import subprocess
@@ -23,10 +24,13 @@ from shlex import quote
 
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-FAST_ALIGN = ROOT + '/third-party/fast_align/build'
-MOSES = ROOT + '/third-party/moses'
-VECMAP = ROOT + '/third-party/vecmap'
-PHRASE2VEC = ROOT + '/third-party/phrase2vec/word2vec'
+THIRD_PARTY = os.path.abspath(os.environ['MONOSES_THIRD_PARTY']) if 'MONOSES_THIRD_PARTY' in os.environ else ROOT + '/third-party'
+FAST_ALIGN = THIRD_PARTY + '/fast_align/build'
+MOSES = THIRD_PARTY + '/moses'
+FAIRSEQ = THIRD_PARTY + '/fairseq'
+VECMAP = THIRD_PARTY + '/vecmap'
+SUBWORD_NMT = THIRD_PARTY + '/subword-nmt'
+PHRASE2VEC = THIRD_PARTY + '/phrase2vec/word2vec'
 TRAINING = ROOT + '/training'
 
 
@@ -34,7 +38,11 @@ def bash(command):
     subprocess.run(['bash', '-c', command])
 
 
-def binarize(output_config, output_pt, lm_path, lm_order, phrase_table, reordering=None, prune=100):
+def count_lines(path):
+    return int(subprocess.run(['wc', '-l', path], stdout=subprocess.PIPE).stdout.decode('utf-8').strip().split()[0])
+
+
+def binarize(output_config, output_pt, lm_path, lm_order, phrase_table, reordering=None, pt_scores=4, prune=100):
     output_pt = os.path.abspath(output_pt)
     lm_path = os.path.abspath(lm_path)
 
@@ -43,7 +51,7 @@ def binarize(output_config, output_pt, lm_path, lm_order, phrase_table, reorderi
     bash(quote(MOSES + '/scripts/generic/binarize4moses2.perl') +
          ' --phrase-table ' + quote(phrase_table) +
          ' --output-dir ' + quote(output_pt) +
-         ' --num-scores 4' +
+         ' --num-scores ' + str(pt_scores) +
          ' --prune ' + str(prune) +
          reord_args)
 
@@ -66,7 +74,7 @@ def binarize(output_config, output_pt, lm_path, lm_order, phrase_table, reorderi
         print('UnknownWordPenalty', file=f)
         print('WordPenalty', file=f)
         print('PhrasePenalty', file=f)
-        print('ProbingPT name=TranslationModel0 num-features=4' + 
+        print('ProbingPT name=TranslationModel0 num-features=' + str(pt_scores) +
               ' path=' + output_pt + ' input-factor=0 output-factor=0', file=f)
         if reordering is not None:
             print('LexicalReordering name=LexicalReordering0' +
@@ -80,98 +88,42 @@ def binarize(output_config, output_pt, lm_path, lm_order, phrase_table, reorderi
         print('UnknownWordPenalty0= 1', file=f)
         print('WordPenalty0= -1', file=f)
         print('PhrasePenalty0= 0.2', file=f)
-        print('TranslationModel0= 0.2 0.2 0.2 0.2', file=f)
+        print('TranslationModel0=' + (' 0.2'*pt_scores), file=f)
         if reordering is not None:
             print('LexicalReordering0= 0.3 0.3 0.3 0.3 0.3 0.3', file=f)
         print('Distortion0= 0.3', file=f)
         print('LM0= 0.5', file=f)
 
 
-def train_supervised(args, train_src, train_trg, dev_src, dev_trg, lm_path, lm_order, output_dir):
-    lm_path = os.path.abspath(lm_path)
-    output_dir = os.path.abspath(output_dir)
-    tmp = args.tmp + '/train-supervised'
-    os.mkdir(tmp)
-
-    # Copy the corpus
-    shutil.copy(train_src, tmp + '/corpus.src')
-    shutil.copy(train_trg, tmp + '/corpus.trg')
-
-    # Corpus cleaning
-    bash(quote(MOSES + '/scripts/training/clean-corpus-n.perl') +
-         ' ' + quote(tmp + '/corpus') + ' src trg' +
-         ' ' + quote(tmp + '/clean') +
-         ' ' + str(args.min_tokens) + ' ' + str(args.max_tokens))  # TODO Reusing min/max from step 1
-    os.remove(tmp + '/corpus.src')
-    os.remove(tmp + '/corpus.trg')
-
-    # Merge both languages into a single file
-    bash('paste -d " ||| " ' + quote(tmp + '/clean.src') +
-         ' /dev/null /dev/null /dev/null /dev/null ' + quote(tmp + '/clean.trg') +
-         ' > ' + quote(tmp + '/clean.txt'))
-
-    # Align
-    bash(quote(FAST_ALIGN + '/fast_align') +
-         ' -i ' + quote(tmp + '/clean.txt') + ' -d -o -v' +
-         ' > ' + quote(tmp + '/forward.align'))
-    bash(quote(FAST_ALIGN + '/fast_align') +
-         ' -i ' + quote(tmp + '/clean.txt') + ' -d -o -v -r' +
-         ' > ' + quote(tmp + '/reverse.align'))
-    os.remove(tmp + '/clean.txt')
-
-    # Symmetrization
-    bash(quote(FAST_ALIGN + '/atools') +
-         ' -i ' + quote(tmp + '/forward.align') +
-         ' -j ' + quote(tmp + '/reverse.align') +
-         ' -c grow-diag-final-and' +
-         ' > ' + quote(tmp + '/aligned.grow-diag-final-and'))
-    os.remove(tmp + '/forward.align')
-    os.remove(tmp + '/reverse.align')
-
-    # Build model
-    bash(quote(MOSES + '/scripts/training/train-model.perl') +
-         ' -model-dir ' + quote(tmp) +
-         ' -corpus ' + quote(tmp) + '/clean' +
-         ' -f src -e trg' +
-         ' -alignment grow-diag-final-and' +
-         ' -reordering msd-bidirectional-fe' +
-         ' -max-phrase-length 5' +
-         ' -temp-dir ' + quote(tmp + '/tmp') +
-         ' -lm "0:{}:{}:8"'.format(lm_order, lm_path) +
-         ' -first-step 4' +
-         ' -score-options="-MinScore 2:0.0001"' +
-         ' -cores ' + str(args.threads) +
-         ' -parallel -sort-buffer-size 10G -sort-batch-size 253 -sort-compress gzip' +
-         ' -sort-parallel ' + str(args.threads))
-    shutil.move(tmp + '/phrase-table.gz', args.tmp)
-    shutil.move(tmp + '/reordering-table.wbe-msd-bidirectional-fe.gz', args.tmp)
-    shutil.rmtree(tmp)
-
-    # Binarize model
-    binarize(args.tmp + '/moses.ini',
-             output_dir + '/probing-table',
-             lm_path,
-             lm_order,
-             args.tmp + '/phrase-table.gz',
-             args.tmp + '/reordering-table.wbe-msd-bidirectional-fe.gz',
-             prune=args.pt_prune)
-    os.remove(args.tmp + '/phrase-table.gz')
-    os.remove(args.tmp + '/reordering-table.wbe-msd-bidirectional-fe.gz')
-
-    # MERT
-    bash(quote(MOSES + '/scripts/training/mert-moses.pl') +
-         ' ' + quote(dev_src) +
-         ' ' + quote(dev_trg) +
-         ' ' + quote(MOSES + '/bin/moses2') +
-         ' ' + quote(args.tmp + '/moses.ini') +
-         ' --no-filter-phrase-table' +
-         ' --mertdir ' + quote(MOSES + '/bin/') +
+def tune(args, input_src2trg, input_trg2src, output_src2trg, output_trg2src):
+    if args.supervised_tuning is not None:
+        for i, part, lang in (0, 'src', args.src_lang), (1, 'trg', args.trg_lang):
+            bash('cat ' + quote(args.supervised_tuning[i]) +
+                 ' | ' + tokenize_command(args, lang) +
+                 ' | ' + quote(MOSES + '/scripts/recaser/truecase.perl') +
+                 ' --model ' + quote(args.working + '/step1/truecase-model.' + part) +
+                 ' > ' + quote(args.tmp + '/dev.true.' + part))
+    else:
+        shutil.copy(args.working + '/step1/dev.true.src', args.tmp + '/dev.true.src')
+        shutil.copy(args.working + '/step1/dev.true.trg', args.tmp + '/dev.true.trg')
+    bash('python3 ' + quote(ROOT + '/training/tuning/tune.py') +
+         ' --dev ' + quote(args.tmp + '/dev.true.src') + ' ' + quote(args.tmp + '/dev.true.trg') +
+         ' --moses ' + quote(MOSES) +
+         ' --input ' + quote(input_src2trg) + ' ' + quote(input_trg2src) +
+         ' --output ' + quote(output_src2trg) + ' ' + quote(output_trg2src) +
          ' --threads ' + str(args.threads) +
-         ' --decoder-flags="-threads ' + str(args.threads) + '"' +
-         ' --working-dir ' + quote(os.path.abspath(args.tmp + '/mert')))
-    shutil.move(args.tmp + '/mert/moses.ini', output_dir + '/moses.ini')
-    shutil.rmtree(args.tmp + '/mert')
-    os.remove(args.tmp + '/moses.ini')
+         ' --cube-pruning-pop-limit ' + str(args.cube_pruning_pop_limit) +
+         ' --iterations {}'.format(args.tuning_iter) +
+         (' --length-init' if args.length_init else '') +
+         ('' if args.supervised_tuning is None else ' --supervised'))
+    os.remove(args.tmp + '/dev.true.src')
+    os.remove(args.tmp + '/dev.true.trg')
+
+
+def tokenize_command(args, lang):
+    return quote(MOSES + '/scripts/tokenizer/normalize-punctuation.perl') + ' -l ' + quote(lang) + \
+           ' | ' + quote(MOSES + '/scripts/tokenizer/remove-non-printing-char.perl') + \
+           ' | ' + quote(MOSES + '/scripts/tokenizer/tokenizer.perl') + ' -q -a -l ' + quote(lang) + ' -threads ' + str(args.threads)
 
 
 # Step 1: Corpus preprocessing
@@ -181,9 +133,8 @@ def preprocess(args):
     for part, corpus, lang in (('src', args.src, args.src_lang), ('trg', args.trg, args.trg_lang)):
         # Tokenize, deduplicate, clean by length, and shuffle
         bash('export LC_ALL=C;' +
-             quote(MOSES + '/scripts/tokenizer/tokenizer.perl') +
-             ' -l ' + quote(lang) + ' -threads ' + str(args.threads) +
-             ' < ' + quote(corpus) +
+             ' cat ' + quote(corpus) +
+             ' | ' + tokenize_command(args, lang) +
              ' | sort -S 10G --batch-size 253 --compress-program gzip' +
              ' --parallel ' + str(args.threads) + ' -T ' + quote(args.tmp) +
              ' | uniq' + 
@@ -289,7 +240,7 @@ def map_embeddings(args):
     os.mkdir(root)
     bash('export OMP_NUM_THREADS=' + str(args.threads) + ';'
          ' python3 ' + quote(VECMAP + '/map_embeddings.py') +
-         ' --unsupervised -v' +
+         ' --' + args.vecmap_mode + ' -v' +
          ' ' + quote(args.working + '/step3/emb.src') +
          ' ' + quote(args.working + '/step3/emb.trg') +
          ' ' + quote(root + '/emb.src') +
@@ -303,7 +254,7 @@ def induce_phrase_table(args):
     root = args.working + '/step5'
     os.mkdir(root)
     bash('export OMP_NUM_THREADS=' + str(args.threads) + ';'
-         ' python3 '  + quote(TRAINING + '/induce-phrase-table.py') +
+         ' python3 ' + quote(TRAINING + '/induce-phrase-table.py') +
          ' --src ' + quote(args.working + '/step4/emb.src') +
          ' --trg ' + quote(args.working + '/step4/emb.trg') +
          ' --src2trg ' + quote(args.tmp + '/src2trg.phrase-table') +
@@ -313,6 +264,7 @@ def induce_phrase_table(args):
              ' sort -S 10G --batch-size 253 --compress-program gzip' +
              ' --parallel ' + str(args.threads) + ' -T ' + quote(args.tmp) +
              ' ' + quote(args.tmp + '/' + part + '.phrase-table') +
+             ('' if args.no_levenshtein else (' |  python3 ' + quote(TRAINING + '/add-levenshtein.py'))) +
              ' | gzip > ' + quote(root + '/' + part + '.phrase-table.gz'))
         os.remove(args.tmp + '/' + part + '.phrase-table')
 
@@ -328,49 +280,15 @@ def build_initial_model(args):
                  args.working + '/step2/' + trg + '.blm',
                  args.lm_order,
                  args.working + '/step5/' + part + '.phrase-table.gz',
+                 pt_scores= 4 if args.no_levenshtein else 6,
                  prune=args.pt_prune)
 
-
-# Step 7: Unsupervised tuning
-def unsupervised_tuning(args):
+# Step 7: Tuning
+def tuning(args):
     root = args.working + '/step7'
     os.mkdir(root)
-    config = {('src', 'trg'): args.working + '/step6/src2trg.moses.ini',
-              ('trg', 'src'): args.working + '/step6/trg2src.moses.ini'}
-    for it in range(1, args.tuning_iter + 1):
-        for src, trg in ('src', 'trg'), ('trg', 'src'):
-
-            # Translate backwards
-            bash(quote(MOSES + '/bin/moses2') +
-                 ' -f ' + quote(config[(trg, src)]) + 
-                 ' --threads ' + str(args.threads) +
-                 ' < ' + quote(args.working + '/step1/dev.true.' + trg) +
-                 ' > ' + quote(args.tmp + '/output.txt') +
-                 ' 2> /dev/null')
-
-            # MERT
-            # TODO Should we start optimization from previous weights?
-            bash(quote(MOSES + '/scripts/training/mert-moses.pl') +
-                 ' ' + quote(args.tmp + '/output.txt') +
-                 ' ' + quote(args.working + '/step1/dev.true.' + trg) +
-                 ' ' + quote(MOSES + '/bin/moses2') +
-                 ' ' + quote(config[(src, trg)]) +
-                 ' --no-filter-phrase-table' +
-                 ' --mertdir ' + quote(MOSES + '/bin/') +
-                 ' --threads ' + str(args.threads) +
-                 ' --decoder-flags="-threads ' + str(args.threads) + '"' +
-                 ' --working-dir ' + quote(os.path.abspath(args.tmp + '/mert')))
-
-            # Move tuned configuration file
-            config[(src, trg)] = root + '/' + src + '2' + trg + '.it' + str(it) + '.moses.ini'
-            shutil.move(args.tmp + '/mert/moses.ini', config[(src, trg)])
-
-            # Remove temporary files
-            shutil.rmtree(args.tmp + '/mert')
-            os.remove(args.tmp + '/output.txt')
-
-    shutil.copy(root + '/src2trg.it{0}.moses.ini'.format(args.tuning_iter), root + '/src2trg.moses.ini')
-    shutil.copy(root + '/trg2src.it{0}.moses.ini'.format(args.tuning_iter), root + '/trg2src.moses.ini')
+    tune(args, args.working + '/step6/src2trg.moses.ini', args.working + '/step6/trg2src.moses.ini',
+         root + '/src2trg.moses.ini', root + '/trg2src.moses.ini')
 
 
 # Step 8: Iterative backtranslation
@@ -383,37 +301,326 @@ def iterative_backtranslation(args):
         bash('head -' + str(args.backtranslation_sentences) +
              ' ' + quote(args.working + '/step1/train.true.' + part) +
              ' > ' + quote(args.tmp + '/train.' + part))
+    if args.supervised_tuning is not None:
+        for i, part, lang in (0, 'src', args.src_lang), (1, 'trg', args.trg_lang):
+            bash('cat ' + quote(args.supervised_tuning[i]) +
+                 ' | ' + tokenize_command(args, lang) +
+                 ' | ' + quote(MOSES + '/scripts/recaser/truecase.perl') +
+                 ' --model ' + quote(args.working + '/step1/truecase-model.' + part) +
+                 ' > ' + quote(args.tmp + '/dev.true.' + part))
+
     for it in range(1, args.backtranslation_iter + 1):
         for src, trg in ('src', 'trg'), ('trg', 'src'):
-            # TODO Use cube pruning?
+            # Backtranslation
             bash(quote(MOSES + '/bin/moses2') +
-                 ' -f ' + quote(config[(trg, src)]) + 
+                 ' -f ' + quote(config[(trg, src)]) +
+                 ' -search-algorithm 1 -cube-pruning-pop-limit {0} -s {0}'.format(args.cube_pruning_pop_limit) +
                  ' --threads ' + str(args.threads) +
                  ' < ' + quote(args.tmp + '/train.' + trg) +
                  ' > ' + quote(args.tmp + '/train.bt') +
                  ' 2> /dev/null')
-            bash(quote(MOSES + '/bin/moses2') +
-                 ' -f ' + quote(config[(trg, src)]) + 
-                 ' --threads ' + str(args.threads) +
-                 ' < ' + quote(args.working + '/step1/dev.true.' + trg) +
-                 ' > ' + quote(args.tmp + '/dev.bt') +
-                 ' 2> /dev/null')
-            train_supervised(args,
-                             args.tmp + '/train.bt',
-                             args.tmp + '/train.' + trg,
-                             args.tmp + '/dev.bt',
-                             args.working + '/step1/dev.true.' + trg,
-                             args.working + '/step2/' + trg + '.blm',
-                             args.lm_order,
-                             root + '/' + src + '2' + trg + '-it' + str(it))
-            os.remove(args.tmp + '/train.bt')
-            os.remove(args.tmp + '/dev.bt')
-            config[(src, trg)] = root + '/' + src + '2' + trg + '-it' + str(it) + '/moses.ini'
 
-    shutil.copy(config[('src', 'trg')], args.working + '/src2trg.moses.ini')
-    shutil.copy(config[('trg', 'src')], args.working + '/trg2src.moses.ini')
-    os.remove(args.tmp + '/train.src')
-    os.remove(args.tmp + '/train.trg')
+            output_dir = root + '/' + src + '2' + trg + '-it' + str(it)
+            tmp = args.tmp + '/train-supervised'
+            os.mkdir(output_dir)
+            os.mkdir(tmp)
+
+            # Corpus cleaning
+            bash(quote(MOSES + '/scripts/training/clean-corpus-n.perl') +
+                 ' ' + quote(args.tmp + '/train') + ' bt ' + trg +
+                 ' ' + quote(tmp + '/clean') +
+                 ' ' + str(args.min_tokens) + ' ' + str(args.max_tokens))  # TODO Reusing min/max from step 1
+
+            # Merge both languages into a single file
+            bash('paste -d " ||| " ' + quote(tmp + '/clean.bt') +
+                 ' /dev/null /dev/null /dev/null /dev/null ' + quote(tmp + '/clean.' + trg) +
+                 ' > ' + quote(tmp + '/clean.txt'))
+
+            # Align
+            bash(quote(FAST_ALIGN + '/fast_align') +
+                 ' -i ' + quote(tmp + '/clean.txt') + ' -d -o -v' +
+                 ' > ' + quote(tmp + '/forward.align'))
+            bash(quote(FAST_ALIGN + '/fast_align') +
+                 ' -i ' + quote(tmp + '/clean.txt') + ' -d -o -v -r' +
+                 ' > ' + quote(tmp + '/reverse.align'))
+            os.remove(tmp + '/clean.txt')
+
+            # Symmetrization
+            bash(quote(FAST_ALIGN + '/atools') +
+                 ' -i ' + quote(tmp + '/forward.align') +
+                 ' -j ' + quote(tmp + '/reverse.align') +
+                 ' -c grow-diag-final-and' +
+                 ' > ' + quote(tmp + '/aligned.grow-diag-final-and'))
+            os.remove(tmp + '/forward.align')
+            os.remove(tmp + '/reverse.align')
+
+            # Build model
+            bash(quote(MOSES + '/scripts/training/train-model.perl') +
+                 ' -model-dir ' + quote(tmp) +
+                 ' -corpus ' + quote(tmp) + '/clean' +
+                 ' -f bt -e ' + trg +
+                 ' -alignment grow-diag-final-and' +
+                 ' -reordering msd-bidirectional-fe' +
+                 ' -max-phrase-length 5' +
+                 ' -temp-dir ' + quote(tmp + '/tmp') +
+                 ' -lm "0:{}:{}:8"'.format(args.lm_order, os.path.abspath(args.working + '/step2/' + trg + '.blm')) +
+                 ' -first-step 4' +
+                 ' -score-options="-MinScore 2:0.0001"' +
+                 ' -cores ' + str(args.threads) +
+                 ' -parallel -sort-buffer-size 10G -sort-batch-size 253 -sort-compress gzip' +
+                 ' -sort-parallel ' + str(args.threads))
+            shutil.move(tmp + '/phrase-table.gz', args.tmp + '/' + src + '2' + trg + '.phrase-table.gz')
+            shutil.move(tmp + '/reordering-table.wbe-msd-bidirectional-fe.gz', output_dir)
+            shutil.rmtree(tmp)
+
+            # os.remove(args.tmp + '/train.bt')
+            shutil.move(args.tmp + '/train.bt', output_dir + '/train.bt')
+
+        for src, trg in ('src', 'trg'), ('trg', 'src'):
+            output_dir = root + '/' + src + '2' + trg + '-it' + str(it)
+
+            # Phrase table format
+            # SRC TRG ||| TRG2SRC_PROB TRG2SRC_LEX SRC2TRG_PROB SRC2TRG_LEX ||| TRG_COUNT SRC_COUNT JOINT_COUNT
+
+            # Merge phrase-tables
+            phrase2scores = {}
+            with gzip.open(args.tmp + '/' + trg + '2' + src + '.phrase-table.gz', mode='rt', encoding='utf-8', errors='surrogateescape') as f:
+                for line in f:
+                    cols = line.split('|||')
+                    phrase2scores[(cols[1].strip(), cols[0].strip())] = cols[2].strip()
+            with gzip.open(args.tmp + '/' + src + '2' + trg + '.phrase-table.gz', mode='rt', encoding='utf-8', errors='surrogateescape') as fin:
+                with gzip.open(output_dir + '/phrase-table.gz', mode='xt', encoding='utf-8', errors='surrogateescape') as fout:
+                    for line in fin:
+                        cols = line.split('|||')
+                        scores = phrase2scores.get((cols[0].strip(), cols[1].strip()))
+                        if scores is not None:
+                            cols[2] = ' ' + ' '.join(scores.strip().split()[2:] + cols[2].strip().split()[2:]) + ' '
+                            print('|||'.join(cols), end='', file=fout)
+            del phrase2scores
+
+            # Binarize model
+            binarize(output_dir + '/default.moses.ini',
+                     output_dir + '/probing-table',
+                     os.path.abspath(args.working + '/step2/' + trg + '.blm'),
+                     args.lm_order,
+                     output_dir + '/phrase-table.gz',
+                     output_dir + '/reordering-table.wbe-msd-bidirectional-fe.gz',
+                     prune=args.pt_prune)
+
+        if not args.no_backtranslation_tuning:
+            tune(args,
+                 '{}/src2trg-it{}/default.moses.ini'.format(root, it),
+                 '{}/trg2src-it{}/default.moses.ini'.format(root, it),
+                 '{}/src2trg-it{}/moses.ini'.format(root, it),
+                 '{}/trg2src-it{}/moses.ini'.format(root, it))
+        else:
+            shutil.copy('{}/src2trg-it{}/default.moses.ini'.format(root, it), '{}/src2trg-it{}/moses.ini'.format(root, it))
+            shutil.copy('{}/trg2src-it{}/default.moses.ini'.format(root, it), '{}/trg2src-it{}/moses.ini'.format(root, it))
+
+        config[('src', 'trg')] = '{}/src2trg-it{}/moses.ini'.format(root, it)
+        config[('trg', 'src')] = '{}/trg2src-it{}/moses.ini'.format(root, it)
+
+        # os.remove(args.tmp + '/src2trg.phrase-table.gz')
+        # os.remove(args.tmp + '/trg2src.phrase-table.gz')
+        shutil.move(args.tmp + '/src2trg.phrase-table.gz', root + '/src2trg-' + str(it) + '.phrase-table.gz')
+        shutil.move(args.tmp + '/trg2src.phrase-table.gz', root + '/trg2src-' + str(it) + '.phrase-table.gz')
+
+    # TODO Tuning in the last iteration is unnecessary
+
+    if args.supervised_tuning is None:  # Use default weights in the final model
+        shutil.copy('{}/src2trg-it{}/default.moses.ini'.format(root, args.backtranslation_iter), root + '/src2trg.moses.ini')
+        shutil.copy('{}/trg2src-it{}/default.moses.ini'.format(root, args.backtranslation_iter), root + '/trg2src.moses.ini')
+    else:
+        shutil.copy('{}/src2trg-it{}/moses.ini'.format(root, args.backtranslation_iter), root + '/src2trg.moses.ini')
+        shutil.copy('{}/trg2src-it{}/moses.ini'.format(root, args.backtranslation_iter), root + '/trg2src.moses.ini')
+    # os.remove(args.tmp + '/train.src')
+    # os.remove(args.tmp + '/train.trg')
+    shutil.move(args.tmp + '/train.src', root + '/train.src')
+    shutil.move(args.tmp + '/train.trg', root + '/train.trg')
+
+
+# Step 9: Synthetic parallel corpus generation
+def generate_bitext(args):
+    root = args.working + '/step9'
+    os.mkdir(root)
+
+    # Concatenate and shuffle both corpora oversampling the smallest one, and learn BPE on it
+    src_lines = count_lines(args.working + '/step1/train.true.src')
+    trg_lines = count_lines(args.working + '/step1/train.true.trg')
+    if src_lines > trg_lines:
+        max_lines, max_corpus = src_lines, args.working + '/step1/train.true.src'
+        min_lines, min_corpus = trg_lines, args.working + '/step1/train.true.trg'
+    else:
+        max_lines, max_corpus = trg_lines, args.working + '/step1/train.true.trg'
+        min_lines, min_corpus = src_lines, args.working + '/step1/train.true.src'
+    bash('cat ' + quote(min_corpus) +
+         ' | shuf' +
+         ' | head -' + str(max_lines % min_lines) +
+         ' | cat - ' + ' '.join([quote(min_corpus)] * (max_lines // min_lines)) + ' ' + quote(max_corpus) +
+         ' | shuf' +
+         ' > ' + quote(args.tmp + '/all.txt'))
+    bash('python3 ' + quote(SUBWORD_NMT + '/subword_nmt/learn_bpe.py') + ' -s ' + str(args.bpe_tokens) +
+         ' < ' + quote(args.tmp + '/all.txt') +
+         ' > ' + quote(root + '/bpe.codes'))
+    os.remove(args.tmp + '/all.txt')
+
+    # Backtranslate and apply BPE
+    for src, trg in ('src', 'trg'), ('trg', 'src'):
+        bash('head -' + str(args.bitext_sentences) + ' ' + quote(args.working + '/step1/train.true.' + src) +
+             ' | ' + quote(MOSES + '/bin/moses2') +
+             ' -f ' + quote(args.working + '/step8/' + src + '2' + trg + '.moses.ini') +
+             ' -search-algorithm 1 -cube-pruning-pop-limit {0} -s {0}'.format(args.cube_pruning_pop_limit) +
+             ' --threads ' + str(args.threads) +
+             ' 2> /dev/null' +
+             ' | python3 ' + quote(SUBWORD_NMT + '/subword_nmt/apply_bpe.py') +
+             ' -c ' + quote(root + '/bpe.codes') +
+             ' > ' + quote(root + '/train.' + trg + '2' + src + '.' + trg))
+        bash('python3 ' + quote(SUBWORD_NMT + '/subword_nmt/apply_bpe.py') +
+             ' -c ' + quote(root + '/bpe.codes') +
+             ' < ' + quote(args.working + '/step1/train.true.' + src) +
+             ' > ' + quote(root + '/train.' + trg + '2' + src + '.' + src))
+
+    # Extract vocabulary
+    bash('cat ' + quote(root + '/train.trg2src.src') + ' ' + quote(root + '/train.src2trg.trg') +
+         ' | python3 ' + quote(SUBWORD_NMT + '/subword_nmt/get_vocab.py') +
+         ' > ' + quote(root + '/vocab.txt'))
+
+
+# Step 10: NMT training
+def train_nmt(args):
+    root = args.working + '/step10'
+    os.mkdir(root)
+
+    src_reader = open(args.working + '/step9/train.trg2src.src', encoding='utf-8', errors='surrogateescape')
+    trg_reader = open(args.working + '/step9/train.src2trg.trg', encoding='utf-8', errors='surrogateescape')
+    src2trg_src_reader = open(args.working + '/step9/train.src2trg.src', encoding='utf-8', errors='surrogateescape')
+    src2trg_trg_reader = open(args.working + '/step9/train.src2trg.trg', encoding='utf-8', errors='surrogateescape')
+    trg2src_src_reader = open(args.working + '/step9/train.trg2src.src', encoding='utf-8', errors='surrogateescape')
+    trg2src_trg_reader = open(args.working + '/step9/train.trg2src.trg', encoding='utf-8', errors='surrogateescape')
+
+    # Skip initial lines for the monolingual readers
+    for i in range(count_lines(args.working + '/step9/train.trg2src.trg')):
+        src_reader.readline()
+    for i in range(count_lines(args.working + '/step9/train.src2trg.src')):
+        trg_reader.readline()
+    
+    bash('echo . > ' + quote(args.tmp + '/dummy.src'))
+    bash('echo . > ' + quote(args.tmp + '/dummy.trg'))
+    for it in range(1, args.nmt_iter + 1):
+        print('IT {}'.format(it))
+        for src, trg, smt_src, smt_trg, mono_trg in ('src', 'trg', src2trg_src_reader, src2trg_trg_reader, trg_reader), \
+                                                    ('trg', 'src', trg2src_trg_reader, trg2src_src_reader, src_reader):
+            
+            # Compute SMT/NMT ratio
+            nmt_percentage = min(1.0, (it - 1) / (args.nmt_transition_iter - 1))
+            nmt_sentences_per_gpu = int(args.nmt_sentences_per_iter * nmt_percentage) // len(args.nmt_gpus)
+            smt_sentences = args.nmt_sentences_per_iter - nmt_sentences_per_gpu * len(args.nmt_gpus)
+
+            # Build (copy) SMT training
+            with open(args.tmp + '/train.' + src, mode='w', encoding='utf-8', errors='surrogateescape') as fsrc:
+                with open(args.tmp + '/train.' + trg, mode='w', encoding='utf-8', errors='surrogateescape') as ftrg:
+                    count = 0
+                    while count < smt_sentences:
+                        srcsent = smt_src.readline()
+                        trgsent = smt_trg.readline()
+                        if srcsent == '' or trgsent == '':
+                            smt_src.seek(0)
+                            smt_trg.seek(0)
+                        else:
+                            count += 1
+                            print(srcsent, end='', file=fsrc)
+                            print(trgsent, end='', file=ftrg)
+
+            # Build NMT training
+            if nmt_sentences_per_gpu > 0:
+                command = ''
+                for i, gpu in enumerate(args.nmt_gpus):
+                    with open(args.tmp + '/mono.' + str(gpu), mode='w', encoding='utf-8', errors='surrogateescape') as f:
+                        count = 0
+                        while count < nmt_sentences_per_gpu:
+                            sent = mono_trg.readline()
+                            if sent == '':
+                                mono_trg.seek(0)
+                            else:
+                                count += 1
+                                print(sent, end='', file=f)
+                    command += 'cat ' + quote(args.tmp + '/mono.' + str(gpu))
+                    command += ' | CUDA_VISIBLE_DEVICES=' + str(gpu)
+                    command += ' python3 ' + quote(FAIRSEQ + '/interactive.py') + ' ' + quote(args.tmp + '/' + trg + '2' + src + '.data.bin')
+                    command += ' --path ' + quote(args.tmp + '/' + trg + '2' + src + '/checkpoint_last.pt')
+                    command += ' --beam 1'
+                    if i % 2 == 0:  # TODO Assuming that the number of GPUs is even
+                        command += ' --sampling'
+                    command += ' --max-tokens 10000'
+                    command += ' --max-len-a 2'
+                    command += ' --max-len-b 5'
+                    command += ' --buffer-size ' + str(nmt_sentences_per_gpu)
+                    if args.nmt_fp16:
+                        command += ' --fp16'
+                    command += ' | grep -P \'^H\t\''
+                    command += ' | cut -f3'
+                    command += ' > ' + quote(args.tmp + '/bt.' + str(gpu))
+                    command += ' &\n'
+                bash(command + 'wait')
+                for gpu in args.nmt_gpus:
+                    bash('cat ' + quote(args.tmp + '/bt.' + str(gpu)) + ' >> ' + quote(args.tmp + '/train.' + src))
+                    bash('cat ' + quote(args.tmp + '/mono.' + str(gpu)) + ' >> ' + quote(args.tmp + '/train.' + trg))
+                    os.remove(args.tmp + '/bt.' + str(gpu))
+                    os.remove(args.tmp + '/mono.' + str(gpu))
+
+            # Binarize training data
+            bash('python3 ' + quote(FAIRSEQ + '/preprocess.py') +
+                ' --source-lang ' + src +
+                ' --target-lang ' + trg +
+                ' --trainpref ' + quote(args.tmp + '/train') +
+                ' --validpref ' + quote(args.tmp + '/dummy') +
+                ' --destdir ' + quote(args.tmp + '/' + src + '2' + trg + '.data.bin') +
+                ' --srcdict ' + quote(args.working + '/step9/vocab.txt') +
+                ' --tgtdict ' + quote(args.working + '/step9/vocab.txt') +
+                ' --workers ' + str(args.threads))
+            os.remove(args.tmp + '/train.src')
+            os.remove(args.tmp + '/train.trg')
+
+            # Train NMT
+            bash('CUDA_VISIBLE_DEVICES=' + ','.join([str(gpu) for gpu in args.nmt_gpus]) +
+                 ' python3 ' + quote(FAIRSEQ + '/train.py') + ' ' + quote(args.tmp + '/' + src + '2' + trg + '.data.bin') +
+                 ' --arch transformer_vaswani_wmt_en_de_big --share-all-embeddings' +
+                 ' --optimizer adam --adam-betas \'(0.9, 0.98)\' --clip-norm 0.0' +
+                 ' --lr-scheduler inverse_sqrt --warmup-init-lr 1e-07 --warmup-updates 4000' +
+                 ' --lr 0.0005 --min-lr 1e-09' +
+                 ' --dropout 0.3 --weight-decay 0.0 --criterion label_smoothed_cross_entropy --label-smoothing 0.1' +
+                 ' --max-tokens 2500' +
+                 ' --update-freq ' +  str(args.nmt_cumul) +
+                 ' --save-dir ' + quote(args.tmp + '/' + src + '2' + trg) +
+                 ' --save-interval 1 --save-interval-updates 0 --no-epoch-checkpoints' +
+                 ' --max-epoch 1' +
+                 ' --log-format simple --log-interval 100' +
+                 (' --fp16' if args.nmt_fp16 else ''))
+
+            # Reset training iterator
+            bash('python3 ' + quote(TRAINING + '/reset-fairseq-iterator.py') +
+                 ' ' + quote(args.tmp + '/' + src + '2' + trg + '/checkpoint_last.pt'))
+            
+            # Save checkpoint
+            if it % args.nmt_save_interval == 0:
+                shutil.copy(args.tmp + '/' + src + '2' + trg + '/checkpoint_last.pt', root + '/' + src + '2' + trg + '.' + str(it) + '.pt')
+    
+    # Save final checkpoint
+    shutil.copy(args.tmp + '/src2trg/checkpoint_last.pt', root + '/src2trg.pt')
+    shutil.copy(args.tmp + '/trg2src/checkpoint_last.pt', root + '/trg2src.pt')
+
+    # Save dictionaries
+    os.mkdir(root + '/data.bin')
+    shutil.copy(args.tmp + '/src2trg.data.bin/dict.src.txt', root + '/data.bin/dict.src.txt')
+    shutil.copy(args.tmp + '/src2trg.data.bin/dict.trg.txt', root + '/data.bin/dict.trg.txt')
+
+    # Cleaning
+    os.remove(args.tmp + '/dummy.src')
+    os.remove(args.tmp + '/dummy.trg')
+    shutil.rmtree(args.tmp + '/src2trg')
+    shutil.rmtree(args.tmp + '/trg2src')
+    shutil.rmtree(args.tmp + '/src2trg.data.bin')
+    shutil.rmtree(args.tmp + '/trg2src.data.bin')
 
 
 def main():
@@ -429,11 +636,12 @@ def main():
     parser.add_argument('--threads', metavar='N', type=int, default=20, help='Number of threads (defaults to 20)')
 
     parser.add_argument('--pt-prune', metavar='N', type=int, default=100, help='Phrase-table pruning (defaults to 100)')  # TODO Which group?
+    parser.add_argument('--cube-pruning-pop-limit', metavar='N', type=int, default=1000, help='Cube pruning pop limit for fast decoding (defaults to 1000)')  # TODO Which group?
 
     preprocessing_group = parser.add_argument_group('Step 1', 'Corpus preprocessing')
     preprocessing_group.add_argument('--min-tokens', metavar='N', type=int, default=3, help='Remove sentences with less than N tokens (defaults to 3)')
     preprocessing_group.add_argument('--max-tokens', metavar='N', type=int, default=80, help='Remove sentences with more than N tokens (defaults to 80)')
-    preprocessing_group.add_argument('--dev-size', metavar='N', type=int, default=10000, help='Number of sentences for tuning (defaults to 10000)')
+    preprocessing_group.add_argument('--dev-size', metavar='N', type=int, default=2000, help='Number of sentences for tuning (defaults to 2000)')
 
     lm_group = parser.add_argument_group('Step 2', 'Language model training')
     lm_group.add_argument('--lm-order', metavar='N', type=int, default=5, help='Language model order (defaults to 5)')
@@ -447,12 +655,34 @@ def main():
     phrase2vec_group.add_argument('--emb-negative', metavar='N', type=int, default=10, help='Number of negative examples (defaults to 10)')
     phrase2vec_group.add_argument('--emb-iter', metavar='N', type=int, default=5, help='Number of training epochs (defaults to 5)')
 
+    vecmap_group = parser.add_argument_group('Step 4', 'Embedding mapping')
+    vecmap_group.add_argument('--vecmap-mode', choices=['identical', 'unsupervised'], default='identical', help='VecMap mode (defaults to identical)')
+
+    induce_group = parser.add_argument_group('Step 5', 'Phrase-table induction')
+    induce_group.add_argument('--no-levenshtein', action='store_true', help='Do not include Levenshtein distance in the initial phrase-table')
+
     tuning_group = parser.add_argument_group('Step 7', 'Unsupervised tuning')
     tuning_group.add_argument('--tuning-iter', metavar='N', type=int, default=10, help='Number of unsupervised tuning iterations (defaults to 10)')
+    tuning_group.add_argument('--supervised-tuning', metavar='PATH', nargs=2, help='Parallel corpus for supervised tuning (source/target)')  # TODO Also used for iterative backtranslation
+    tuning_group.add_argument('--length-init', action='store_true', help='use length-based initialization')
 
     backtranslation_group = parser.add_argument_group('Step 8', 'Iterative backtranslation')
     backtranslation_group.add_argument('--backtranslation-iter', metavar='N', type=int, default=3, help='Number of backtranslation iterations (defaults to 3)')
-    backtranslation_group.add_argument('--backtranslation-sentences', metavar='N', type=int, default=2000000, help='Number of sentences for training backtranslation (defaults to 2000000)')
+    backtranslation_group.add_argument('--backtranslation-sentences', metavar='N', type=int, default=10000000, help='Number of sentences for training backtranslation (defaults to 10000000)')
+    backtranslation_group.add_argument('--no-backtranslation-tuning', action='store_true', help='Disable unsupervised tuning for iterative refinement (use default weights)')
+
+    bitext_group = parser.add_argument_group('Step 9', 'Synthetic parallel corpus generation')
+    bitext_group.add_argument('--bpe-tokens', metavar='N', type=int, default=32000, help='BPE vocabulary size')
+    bitext_group.add_argument('--bitext-sentences', metavar='N', type=int, default=15000000, help='Number of sentences for bitext generation (defaults to 15000000)')
+
+    nmt_group = parser.add_argument_group('Step 10', 'NMT training')
+    nmt_group.add_argument('--nmt-iter', metavar='N', type=int, default=60, help='Number of NMT training iterations (defaults to 60)')
+    nmt_group.add_argument('--nmt-sentences-per-iter', metavar='N', type=int, default=1000000, help='Number of sentences for each NMT training iteration (defaults to 1000000)')
+    nmt_group.add_argument('--nmt-save-interval', metavar='N', type=int, default=1, help='Save a checkpoint every N iterations (defaults to 1)')
+    nmt_group.add_argument('--nmt-transition-iter', metavar='N', type=int, default=30, help='Number of transition iterations between SMT and NMT backtranslation (defaults to 30)')
+    nmt_group.add_argument('--nmt-cumul', metavar='N', type=int, default=2, help='Cumulate gradients over N backwards (defaults to 2)')
+    nmt_group.add_argument('--nmt-gpus', nargs='+', metavar='N', type=int, default=[0, 1, 2, 3], help='GPU IDs for NMT training (defaults to 0 1 2 3)')
+    nmt_group.add_argument('--nmt-fp16', action='store_true', help='Enable FP16 training')
 
     args = parser.parse_args()
 
@@ -475,10 +705,13 @@ def main():
         if args.from_step <= 6 <= args.to_step:
             build_initial_model(args)
         if args.from_step <= 7 <= args.to_step:
-            unsupervised_tuning(args)
+            tuning(args)
         if args.from_step <= 8 <= args.to_step:
             iterative_backtranslation(args)
-
+        if args.from_step <= 9 <= args.to_step:
+            generate_bitext(args)
+        if args.from_step <= 10 <= args.to_step:
+            train_nmt(args)
 
 if __name__ == '__main__':
     main()
