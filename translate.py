@@ -64,7 +64,7 @@ def main():
             command += ' --cpu'
         if args.fp16:
             command += ' --fp16'
-        command += ' | grep -P \'^H\t\''
+        command += ' | grep -P \'^H-\''
         command += ' | cut -f3'
         command += ' | sed -r \'s/(@@ )|(@@ ?$)//g\''
     else:

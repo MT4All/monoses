@@ -557,7 +557,7 @@ def train_nmt(args):
                     command += ' --buffer-size ' + str(nmt_sentences_per_gpu)
                     if args.nmt_fp16:
                         command += ' --fp16'
-                    command += ' | grep -P \'^H\t\''
+                    command += ' | grep -P \'^H-\''
                     command += ' | cut -f3'
                     command += ' > ' + quote(args.tmp + '/bt.' + str(gpu))
                     command += ' &\n'
