@@ -1,7 +1,7 @@
 Monoses
 ==============
 
-This is ana open source implementation of our unsupervised statistical machine translation system, described in the following paper:
+This is an open source implementation of our unsupervised statistical machine translation system, described in the following paper:
 
 Mikel Artetxe, Gorka Labaka, and Eneko Agirre. 2018. **[Unsupervised Statistical Machine Translation](https://arxiv.org/pdf/1809.01272.pdf)**. In *Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing (EMNLP 2018)*.
 
