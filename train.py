@@ -27,7 +27,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 THIRD_PARTY = os.path.abspath(os.environ['MONOSES_THIRD_PARTY']) if 'MONOSES_THIRD_PARTY' in os.environ else ROOT + '/third-party'
 FAST_ALIGN = THIRD_PARTY + '/fast_align/build'
 MOSES = THIRD_PARTY + '/moses'
-FAIRSEQ = THIRD_PARTY + '/fairseq'
+#FAIRSEQ = THIRD_PARTY + '/fairseq'
 VECMAP = THIRD_PARTY + '/vecmap'
 SUBWORD_NMT = THIRD_PARTY + '/subword-nmt'
 PHRASE2VEC = THIRD_PARTY + '/phrase2vec/word2vec'
@@ -546,7 +546,7 @@ def train_nmt(args):
                                 print(sent, end='', file=f)
                     command += 'cat ' + quote(args.tmp + '/mono.' + str(gpu))
                     command += ' | CUDA_VISIBLE_DEVICES=' + str(gpu)
-                    command += ' python3 ' + quote(FAIRSEQ + '/interactive.py') + ' ' + quote(args.tmp + '/' + trg + '2' + src + '.data.bin')
+                    command += ' fairseq-interactive ' + quote(args.tmp + '/' + trg + '2' + src + '.data.bin')
                     command += ' --path ' + quote(args.tmp + '/' + trg + '2' + src + '/checkpoint_last.pt')
                     command += ' --beam 1'
                     if i % 2 == 0:  # TODO Assuming that the number of GPUs is even
@@ -569,7 +569,7 @@ def train_nmt(args):
                     os.remove(args.tmp + '/mono.' + str(gpu))
 
             # Binarize training data
-            bash('python3 ' + quote(FAIRSEQ + '/preprocess.py') +
+            bash('fairseq-preprocess' +
                 ' --source-lang ' + src +
                 ' --target-lang ' + trg +
                 ' --trainpref ' + quote(args.tmp + '/train') +
@@ -583,7 +583,7 @@ def train_nmt(args):
 
             # Train NMT
             bash('CUDA_VISIBLE_DEVICES=' + ','.join([str(gpu) for gpu in args.nmt_gpus]) +
-                 ' python3 ' + quote(FAIRSEQ + '/train.py') + ' ' + quote(args.tmp + '/' + src + '2' + trg + '.data.bin') +
+                 ' fairseq-train ' + quote(args.tmp + '/' + src + '2' + trg + '.data.bin') +
                  ' --arch transformer_vaswani_wmt_en_de_big --share-all-embeddings' +
                  ' --optimizer adam --adam-betas \'(0.9, 0.98)\' --clip-norm 0.0' +
                  ' --lr-scheduler inverse_sqrt --warmup-init-lr 1e-07 --warmup-updates 4000' +
