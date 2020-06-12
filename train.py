@@ -489,7 +489,16 @@ def generate_bitext(args):
 # Step 10: NMT training
 def train_nmt(args):
     root = args.working + '/step10'
-    os.mkdir(root)
+    if not args.nmt_cont:
+        os.mkdir(root)
+    elif not os.path.exists(root + '/src2trg.1.pt') or not os.path.exists(root + '/trg2src.1.pt') or not os.path.exists(root + '/data.bin'):
+        print("Previous training data not found")
+        exit
+    else:
+        os.mkdir(args.tmp + '/src2trg')
+        os.mkdir(args.tmp + '/trg2src')
+        os.mkdir(args.tmp + '/src2trg.data.bin')
+        os.mkdir(args.tmp + '/trg2src.data.bin')
 
     src_reader = open(args.working + '/step9/train.trg2src.src', encoding='utf-8', errors='surrogateescape')
     trg_reader = open(args.working + '/step9/train.src2trg.trg', encoding='utf-8', errors='surrogateescape')
@@ -508,9 +517,21 @@ def train_nmt(args):
     bash('echo . > ' + quote(args.tmp + '/dummy.trg'))
     for it in range(1, args.nmt_iter + 1):
         print('IT {}'.format(it))
+        if args.nmt_cont and os.path.exists(root + '/src2trg.' + str(it) + '.pt') and os.path.exists(root + '/trg2src.' + str(it) + '.pt'):
+            print("skipping iteration {}".format(it))
+            continue
+
         for src, trg, smt_src, smt_trg, mono_trg in ('src', 'trg', src2trg_src_reader, src2trg_trg_reader, trg_reader), \
                                                     ('trg', 'src', trg2src_trg_reader, trg2src_src_reader, src_reader):
             
+            if it > 1 and not os.path.exists(args.tmp + '/' + src + '2' + trg + '/checkpoint_last.pt'):
+                shutil.copy(root + '/data.bin/dict.src.txt', args.tmp + '/' + src + '2' + trg + '.data.bin/dict.' + src + '.txt')
+                shutil.copy(root + '/data.bin/dict.trg.txt', args.tmp + '/' + src + '2' + trg + '.data.bin/dict.' + trg + '.txt')
+                shutil.copy(root + '/' + src + '2' + trg + '.' + str(it-1) + '.pt', args.tmp + '/' + src + '2' + trg + '/checkpoint_last.pt')
+                shutil.copy(root + '/data.bin/dict.src.txt', args.tmp + '/' + trg + '2' + src + '.data.bin/dict.' + trg + '.txt')
+                shutil.copy(root + '/data.bin/dict.trg.txt', args.tmp + '/' + trg + '2' + src + '.data.bin/dict.' + src + '.txt')
+                shutil.copy(root + '/' + trg + '2' + src + '.' + str(it-1) + '.pt', args.tmp + '/' + trg + '2' + src + '/checkpoint_last.pt')
+                
             # Compute SMT/NMT ratio
             nmt_percentage = min(1.0, (it - 1) / (args.nmt_transition_iter - 1))
             nmt_sentences_per_gpu = int(args.nmt_sentences_per_iter * nmt_percentage) // len(args.nmt_gpus)
@@ -554,6 +575,8 @@ def train_nmt(args):
                     command += ' --max-tokens 10000'
                     command += ' --max-len-a 2'
                     command += ' --max-len-b 5'
+                    if args.nmt_cont and it == 1:
+                        command += ' --source-lang '+ src + ' --target-lang '+ trg
                     command += ' --buffer-size ' + str(nmt_sentences_per_gpu)
                     if args.nmt_fp16:
                         command += ' --fp16'
@@ -603,8 +626,12 @@ def train_nmt(args):
             
             # Save checkpoint
             if it % args.nmt_save_interval == 0:
+                if os.path.exists(root + '/data.bin'):
+                    shutil.rmtree(root + '/data.bin')
+                os.mkdir(root + '/data.bin')
+                shutil.copy(args.tmp + '/src2trg.data.bin/dict.src.txt', root + '/data.bin/dict.src.txt')
+                shutil.copy(args.tmp + '/src2trg.data.bin/dict.trg.txt', root + '/data.bin/dict.trg.txt')
                 shutil.copy(args.tmp + '/' + src + '2' + trg + '/checkpoint_last.pt', root + '/' + src + '2' + trg + '.' + str(it) + '.pt')
-    
     # Save final checkpoint
     shutil.copy(args.tmp + '/src2trg/checkpoint_last.pt', root + '/src2trg.pt')
     shutil.copy(args.tmp + '/trg2src/checkpoint_last.pt', root + '/trg2src.pt')
@@ -630,7 +657,7 @@ def main():
     parser.add_argument('--src-lang', metavar='STR', required=True, help='Source language code')
     parser.add_argument('--trg-lang', metavar='STR', required=True, help='Target language code')
     parser.add_argument('--from-step', metavar='N', type=int, default=1, help='Start at step N')
-    parser.add_argument('--to-step', metavar='N', type=int, default=8, help='End at step N')
+    parser.add_argument('--to-step', metavar='N', type=int, default=9, help='End at step N')
     parser.add_argument('--working', metavar='PATH', required=True, help='Working directory')
     parser.add_argument('--tmp', metavar='PATH', help='Temporary directory')
     parser.add_argument('--threads', metavar='N', type=int, default=20, help='Number of threads (defaults to 20)')
@@ -683,6 +710,7 @@ def main():
     nmt_group.add_argument('--nmt-cumul', metavar='N', type=int, default=2, help='Cumulate gradients over N backwards (defaults to 2)')
     nmt_group.add_argument('--nmt-gpus', nargs='+', metavar='N', type=int, default=[0, 1, 2, 3], help='GPU IDs for NMT training (defaults to 0 1 2 3)')
     nmt_group.add_argument('--nmt-fp16', action='store_true', help='Enable FP16 training')
+    nmt_group.add_argument('--nmt-cont', action='store_true', help='continue unfinished training')
 
     args = parser.parse_args()
 
