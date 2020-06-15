@@ -512,7 +512,8 @@ def train_nmt(args):
         src_reader.readline()
     for i in range(count_lines(args.working + '/step9/train.src2trg.src')):
         trg_reader.readline()
-    
+
+    first_iter = 1
     bash('echo . > ' + quote(args.tmp + '/dummy.src'))
     bash('echo . > ' + quote(args.tmp + '/dummy.trg'))
     for it in range(1, args.nmt_iter + 1):
@@ -575,7 +576,7 @@ def train_nmt(args):
                     command += ' --max-tokens 10000'
                     command += ' --max-len-a 2'
                     command += ' --max-len-b 5'
-                    if args.nmt_cont and it == 1:
+                    if args.nmt_cont and first_iter == 1:
                         command += ' --source-lang '+ src + ' --target-lang '+ trg
                     command += ' --buffer-size ' + str(nmt_sentences_per_gpu)
                     if args.nmt_fp16:
@@ -632,6 +633,8 @@ def train_nmt(args):
                 shutil.copy(args.tmp + '/src2trg.data.bin/dict.src.txt', root + '/data.bin/dict.src.txt')
                 shutil.copy(args.tmp + '/src2trg.data.bin/dict.trg.txt', root + '/data.bin/dict.trg.txt')
                 shutil.copy(args.tmp + '/' + src + '2' + trg + '/checkpoint_last.pt', root + '/' + src + '2' + trg + '.' + str(it) + '.pt')
+
+            first_iter = 0
     # Save final checkpoint
     shutil.copy(args.tmp + '/src2trg/checkpoint_last.pt', root + '/src2trg.pt')
     shutil.copy(args.tmp + '/trg2src/checkpoint_last.pt', root + '/trg2src.pt')
