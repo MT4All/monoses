@@ -18,7 +18,6 @@ If you use this software for academic research, please cite the paper in questio
 }
 ```
 
-
 Requirements
 --------
 - Python 3 with [PyTorch](https://pytorch.org/) (tested with v0.4), available from your `PATH`
