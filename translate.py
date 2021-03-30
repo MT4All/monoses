@@ -20,7 +20,6 @@ from shlex import quote
 
 import train
 
-
 ROOT = os.path.dirname(os.path.abspath(__file__))
 THIRD_PARTY = os.path.abspath(os.environ['MONOSES_THIRD_PARTY']) if 'MONOSES_THIRD_PARTY' in os.environ else ROOT + '/third-party'
 MOSES = THIRD_PARTY + '/moses'
