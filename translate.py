@@ -25,6 +25,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 THIRD_PARTY = os.path.abspath(os.environ['MONOSES_THIRD_PARTY']) if 'MONOSES_THIRD_PARTY' in os.environ else ROOT + '/third-party'
 MOSES = THIRD_PARTY + '/moses'
 
+
 def bash(command):
     subprocess.run(['bash', '-c', command])
 
@@ -41,9 +42,11 @@ def main():
     parser.add_argument('--threads', metavar='N', type=int, default=20, help='Number of threads (defaults to 20)')
     parser.add_argument('--cpu', action='store_true', help='Force CPU decoding')
     parser.add_argument('--fp16', action='store_true', help='Enable FP16 decoding')
+    parser.add_argument('--bpe', action='store_true', help='Use BPE for input in steps 6, 7 and 8')
     args = parser.parse_args()
 
     direction = 'trg2src' if args.reverse else 'src2trg'
+    in_part = 'trg' if args.reverse else 'src'
 
     command = 'cat -'
     if not args.tok:
@@ -65,8 +68,10 @@ def main():
             command += ' --fp16'
         command += ' | grep -P \'^H-\''
         command += ' | cut -f3'
-        command += ' | sed -r \'s/(@@ )|(@@ ?$)//g\''
+        #command += ' | sed -r \'s/(@@ )|(@@ ?$)//g\''
     else:
+        if args.bpe:
+            command += ' | python3 ' + quote(train.SUBWORD_NMT + '/subword_nmt/apply_bpe.py') + ' -c ' + quote(args.model + '/step1/bpe.codes.' + in_part)
         command += ' | ' + quote(MOSES + '/bin/moses2')
         if args.step == 6:
             command += ' -f ' + quote(args.model + '/step6/' + direction + '.moses.ini')
@@ -76,6 +81,7 @@ def main():
             command += ' -f ' + quote(args.model + '/step8/' + direction + '.moses.ini')
         command += ' --threads ' + str(args.threads)
         command += ' 2> /dev/null'
+    command += ' | sed -r \'s/(@@ )|(@@ ?$)//g\''
     command += ' | ' + quote(MOSES + '/scripts/recaser/detruecase.perl')
     if not args.tok:
         command += ' | ' + quote(MOSES + '/scripts/tokenizer/detokenizer.perl') + ' -q -l ' + quote(args.trg)

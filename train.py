@@ -130,8 +130,8 @@ def tokenize_command(args, lang):
 def preprocess(args):
     root = args.working + '/step1'
     os.mkdir(root)
-    for part, corpus, lang, copy_part, bpe in (('src', args.src, args.src_lang, args.copy_src_part, args.bpe_smt_src), 
-                                               ('trg', args.trg, args.trg_lang, args.copy_trg_part, args.bpe_smt_trg)):
+    for part, corpus, domain_corpus, lang, mult, copy_part, bpe in (('src', args.src, args.domain_src, args.src_lang, args.domain_src_mult, args.copy_src_part, args.bpe_smt_src), 
+                                                                    ('trg', args.trg, args.domain_trg, args.trg_lang, args.domain_trg_mult, args.copy_trg_part, args.bpe_smt_trg)):
         
         if args.copy_path is not None and copy_part is not None:
             if os.path.exists(f'{args.copy_path}/step1/dev.bpe.{copy_part}'):
@@ -147,17 +147,27 @@ def preprocess(args):
             continue
         
         # Tokenize, deduplicate, clean by length, and shuffle
-        bash('export LC_ALL=C;' +
-             ' cat ' + quote(corpus) +
-             ' | ' + tokenize_command(args, lang) +
-             ' | sort -S 10G --batch-size 253 --compress-program gzip' +
-             ' --parallel ' + str(args.threads) + ' -T ' + quote(args.tmp) +
-             ' | uniq' + 
-             ' | python3 ' + quote(TRAINING + '/clean-corpus.py') +
-                 ' --min ' + str(args.min_tokens) +
-                 ' --max ' + str(args.max_tokens) +
-             ' | shuf'
-             ' > ' + quote(args.tmp + '/full.tok'))
+        for subcorpus, extension in ((corpus, '.general'), (domain_corpus, '.domain')):
+            if subcorpus is not None:
+                bash('export LC_ALL=C;' +
+                     ' cat ' + quote(subcorpus) +
+                     ' | ' + tokenize_command(args, lang) +
+                     ' | sort -S 10G --batch-size 253 --compress-program gzip' +
+                     ' --parallel ' + str(args.threads) + ' -T ' + quote(args.tmp) +
+                     ' | uniq' + 
+                     ' | python3 ' + quote(TRAINING + '/clean-corpus.py') +
+                         ' --min ' + str(args.min_tokens) +
+                         ' --max ' + str(args.max_tokens) +
+                     ' > ' + quote(args.tmp + '/full.tok' + extension))
+                     
+        if domain_corpus is not None:
+            # Oversample domain-specific corpus, merge with the general one
+            bash('shuf ' + quote(args.tmp + '/full.tok.domain') +
+                 " | sed -n '{" + mult*'p;' + "}' " +
+                 ' | cat -  ' + quote(args.tmp + '/full.tok.general') +
+                 ' > ' + quote(args.tmp + '/full.tok'))
+        else:
+            shutil.copy(quote(args.tmp + '/full.tok.general'), quote(args.tmp + '/full.tok'))
 
         # Train truecaser
         bash(quote(MOSES + '/scripts/recaser/train-truecaser.perl') +
@@ -185,17 +195,22 @@ def preprocess(args):
             shutil.copy(quote(args.tmp + '/full.true'), quote(args.tmp + '/full.bpe'))
 
         # Split train/dev
-        bash('head -' + str(args.dev_size) +
-             ' < ' + quote(args.tmp + '/full.bpe') +
+        bash('head -' + str(mult*args.dev_size) + ' ' + quote(args.tmp + '/full.bpe') +
+             (' | uniq' if domain_corpus is not None else '') +
              ' > ' + quote(root + '/dev.bpe.' + part))
-        bash('tail -n +' + str(args.dev_size + 1) +
-             ' < ' + quote(args.tmp + '/full.bpe') +
+        
+        bash('tail -n +' + str(mult*args.dev_size + 1) + ' ' + quote(args.tmp + '/full.bpe') +
+             ' | shuf' +
              ' > ' + quote(root + '/train.bpe.' + part))
 
     # Remove temporary files
-    os.remove(args.tmp + '/full.tok')
-    os.remove(args.tmp + '/full.true')
-    os.remove(args.tmp + '/full.bpe')
+    if args.copy_src_part is None or args.copy_trg_part is None:
+        if domain_corpus is not None:
+            os.remove(args.tmp + '/full.tok.domain')
+        os.remove(args.tmp + '/full.tok.general')
+        os.remove(args.tmp + '/full.tok')
+        os.remove(args.tmp + '/full.true')
+        os.remove(args.tmp + '/full.bpe')
 
 
 # Step 2: Language model training
@@ -737,9 +752,13 @@ def train_nmt(args):
 def main():
     parser = argparse.ArgumentParser(description='Train an unsupervised SMT model')
     parser.add_argument('--src', metavar='PATH', required=True, help='Source language corpus')
+    parser.add_argument('--domain-src', metavar='PATH', help='Source language corpus (domain-specific)')
     parser.add_argument('--trg', metavar='PATH', required=True, help='Target language corpus')
+    parser.add_argument('--domain-trg', metavar='PATH', help='Target language corpus (domain-specific)')
     parser.add_argument('--src-lang', metavar='STR', required=True, help='Source language code')
     parser.add_argument('--trg-lang', metavar='STR', required=True, help='Target language code')
+    parser.add_argument('--domain-src-mult', metavar='N', type=int, default=1, help='Oversampling multiplier for domain-specific corpus (src)')
+    parser.add_argument('--domain-trg-mult', metavar='N', type=int, default=1, help='Oversampling multiplier for domain-specific corpus (trg)')
     parser.add_argument('--from-step', metavar='N', type=int, default=1, help='Start at step N')
     parser.add_argument('--to-step', metavar='N', type=int, default=9, help='End at step N')
     parser.add_argument('--working', metavar='PATH', required=True, help='Working directory')
@@ -762,8 +781,6 @@ def main():
     lm_group = parser.add_argument_group('Step 2', 'Language model training')
     lm_group.add_argument('--lm-order', metavar='N', type=int, default=5, help='Language model order (defaults to 5)')
     lm_group.add_argument('--lm-prune', metavar='N', type=int, nargs='+', default=[0, 0, 1], help='Language model pruning (defaults to 0 0 1)')
-    #lm_group.add_argument('--step2-src', metavar='PATH', help='Path to source language model')
-    #lm_group.add_argument('--step2-trg', metavar='PATH', help='Path to target language model')
 
     phrase2vec_group = parser.add_argument_group('Step 3', 'Phrase embedding training')
     phrase2vec_group.add_argument('--vocab-cutoff', metavar='N', type=int, nargs='+', default=[200000, 400000, 400000], help='Vocabulary cut-off (defaults to 200000 400000 400000)')
@@ -772,8 +789,6 @@ def main():
     phrase2vec_group.add_argument('--emb-window', metavar='N', type=int, default=5, help='Max skip length between words (defauls to 5)')
     phrase2vec_group.add_argument('--emb-negative', metavar='N', type=int, default=10, help='Number of negative examples (defaults to 10)')
     phrase2vec_group.add_argument('--emb-iter', metavar='N', type=int, default=5, help='Number of training epochs (defaults to 5)')
-    #phrase2vec_group.add_argument('--step3-src', metavar='PATH', help='Path to source embeddings')
-    #phrase2vec_group.add_argument('--step3-trg', metavar='PATH', help='Path to target embeddings')
 
     vecmap_group = parser.add_argument_group('Step 4', 'Embedding mapping')
     vecmap_group.add_argument('--vecmap-mode', choices=['identical', 'unsupervised'], default='identical', help='VecMap mode (defaults to identical)')
