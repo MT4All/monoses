@@ -531,13 +531,13 @@ def generate_bitext(args):
     
     # Undo BPE segmentation for SMT
     if args.bpe_smt_src is not None:
-        bash("sed -r 's/(@@ )|(@@ ?$)//g' " + args.working + '/step1/train.bpe.src > ' + root + 'train.true.src')
+        bash("sed -r 's/(@@ )|(@@ ?$)//g' " + args.working + '/step1/train.bpe.src > ' + root + '/train.true.src')
     else:
-        shutil.copy(args.working + '/step1/train.bpe.src', root + 'train.true.src')
+        shutil.copy(args.working + '/step1/train.bpe.src', root + '/train.true.src')
     if args.bpe_smt_trg is not None:
-        bash("sed -r 's/(@@ )|(@@ ?$)//g' " + args.working + '/step1/train.bpe.trg > ' + root + 'train.true.trg')
+        bash("sed -r 's/(@@ )|(@@ ?$)//g' " + args.working + '/step1/train.bpe.trg > ' + root + '/train.true.trg')
     else:
-        shutil.copy(args.working + '/step1/train.bpe.src', root + 'train.true.src')
+        shutil.copy(args.working + '/step1/train.bpe.src', root + '/train.true.src')
 
     # Concatenate and shuffle both corpora oversampling the smallest one, and learn BPE on it
     src_lines = count_lines(root + '/train.true.src')
