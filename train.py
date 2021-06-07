@@ -538,6 +538,7 @@ def generate_bitext(args):
         bash("sed -r 's/(@@ )|(@@ ?$)//g' " + args.working + '/step1/train.bpe.trg > ' + root + '/train.true.trg')
     else:
         shutil.copy(args.working + '/step1/train.bpe.src', root + '/train.true.src')
+        shutil.copy(args.working + '/step1/train.bpe.trg', root + '/train.true.trg')
 
     # Concatenate and shuffle both corpora oversampling the smallest one, and learn BPE on it
     src_lines = count_lines(root + '/train.true.src')
